@@ -1,0 +1,5 @@
+{
+  "name": "Red Light Green Light Crypto - Live",
+  "description": "A high-stakes PVP crypto betting simulation where players vote Red or Green. Includes dynamic late-game fees, bot simulations, and a jackpot mechanic.",
+  "requestFramePermissions": []
+}

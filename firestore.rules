@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // --- User Profiles ---
+    // Allow users to read and write ONLY their own profile
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // --- Transactions ---
+    // Allow any logged-in user to READ transactions (needed to check if a signature was already used)
+    // But only allow them to CREATE transactions for themselves
+    match /transactions/{txnId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+    }
+
+    // --- Withdrawals ---
+    // Allow users to request withdrawals
+    match /withdrawals/{withdrawalId} {
+      allow read: if request.auth != null && resource.data.userId == request.auth.uid;
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+    }
+  }
+}
