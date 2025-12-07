@@ -22,6 +22,7 @@ import { PoolBar } from './components/PoolBar';
 import { ActivityFeed } from './components/ActivityFeed';
 import { DepositModal } from './components/DepositModal';
 import { AdminPanel } from './components/AdminPanel';
+import { EditProfileModal } from './components/EditProfileModal';
 import {
   Trophy,
   DollarSign,
@@ -39,7 +40,7 @@ import {
 } from './components/Icons';
 
 // Services
-import { AuthService, BalanceService, UserProfile, TransactionService } from './services/firebase';
+import { AuthService, BalanceService, UserProfile, TransactionService, GameService } from './services/firebase';
 
 // Floating text interface
 interface FloatingText {
@@ -63,12 +64,13 @@ const App: React.FC = () => {
   // --- Game State ---
   const [betAmount, setBetAmount] = useState<string>('0.5');
   const [showDepositModal, setShowDepositModal] = useState(false);
+  const [showEditProfileModal, setShowEditProfileModal] = useState(false);
   const [gameState, setGameState] = useState<GameState>({
     gameId: 1,
     roundId: 1,
     status: 'WAITING',
     timeLeft: ROUND_DURATION,
-    jackpot: 50,
+    jackpot: 0,
     houseProfit: 0,
     greenPool: 0,
     redPool: 0,
@@ -132,6 +134,19 @@ const App: React.FC = () => {
     return () => unsub();
   }, [user?.uid]);
 
+  // Listen to Withdrawals
+  const [pendingWithdrawalSum, setPendingWithdrawalSum] = useState(0);
+  useEffect(() => {
+    if (!user) return;
+    const unsub = TransactionService.subscribeToWithdrawals(user.uid, (withdrawals: any[]) => {
+      const pending = withdrawals
+        .filter(w => w.status === 'PENDING' || w.status === 'APPROVED_PENDING_TX')
+        .reduce((sum, w) => sum + (w.amount || 0), 0);
+      setPendingWithdrawalSum(pending);
+    });
+    return () => unsub();
+  }, [user?.uid]);
+
   // Initialize Bots
   useEffect(() => {
     const newBots: Bot[] = [];
@@ -189,7 +204,13 @@ const App: React.FC = () => {
           if (publicKey) {
             const walletAddr = publicKey.toBase58();
             await AuthService.updateProfileWallet(walletAddr);
+
+            // NEW: Set Display Name to Short Wallet Address
+            const shortName = shortenAddress(walletAddr);
+            await AuthService.updateProfileName(shortName);
+
             u.solanaWalletAddress = walletAddr;
+            u.displayName = shortName;
             setUser(u);
           }
 
@@ -267,25 +288,36 @@ const App: React.FC = () => {
   const placeBet = async (playerId: string, playerName: string, isBot: boolean, side: Team, amount: number) => {
     if (amount <= 0) return;
 
-    // State update for game pool
-    setGameState(prevState => {
-      const taxRate = calculateCurrentTax(prevState.timeLeft);
-      const taxAmount = amount * taxRate;
-      const poolContribution = amount - taxAmount;
+    const taxRate = calculateCurrentTax(gameState.timeLeft);
+    const taxAmount = amount * taxRate;
+    const poolContribution = amount - taxAmount;
 
+    const newBet: Bet = {
+      id: generateId(),
+      playerId,
+      playerName,
+      isBot,
+      side,
+      originalAmount: amount,
+      poolAmount: poolContribution,
+      timestamp: Date.now()
+    };
+
+    // 1. Send to Server (Critical for Multiplayer)
+    if (!isBot) {
+      try {
+        await GameService.placeBet(newBet);
+      } catch (e) {
+        console.error("Betting Error:", e);
+        alert("Failed to place bet. Check console.");
+        return;
+      }
+    }
+
+    // 2. Optimistic Local Update (for immediate feedback)
+    setGameState(prevState => {
       const newGreenPool = side === 'GREEN' ? prevState.greenPool + poolContribution : prevState.greenPool;
       const newRedPool = side === 'RED' ? prevState.redPool + poolContribution : prevState.redPool;
-
-      const newBet: Bet = {
-        id: generateId(),
-        playerId,
-        playerName,
-        isBot,
-        side,
-        originalAmount: amount,
-        poolAmount: poolContribution,
-        timestamp: Date.now()
-      };
 
       return {
         ...prevState,
@@ -296,105 +328,122 @@ const App: React.FC = () => {
       };
     });
 
-    if (!isBot) {
-      await BalanceService.updateBalance(-amount); // Deduct from Firestore (Mock)
-      addLog('You', `Bet ${formatCurrency(amount)} on ${side}`, side === 'GREEN' ? 'GREEN' : 'RED');
-      addFloatingText(`+${formatCurrency(amount)}`, side === 'GREEN' ? 'text-green-400' : 'text-red-400');
-    } else {
-      // Bot Effects
-      const isWhaleBet = amount > 2; // Whale threshold in SOL
+    // Bot Effects
+    const isWhaleBet = amount > 2; // Whale threshold in SOL
 
-      if (isWhaleBet) {
-        addLog(playerName, `WHALE ALERT! Bet ${formatCurrency(amount)} on ${side}`, 'ALERT');
-        triggerShake();
-        addFloatingText(`WHALE! ${formatCurrency(amount)}`, side === 'GREEN' ? 'text-green-300 font-bold text-xl' : 'text-red-300 font-bold text-xl');
-      } else {
-        if (Math.random() > 0.8) {
-          addLog(playerName, `Bet ${formatCurrency(amount)} on ${side}`, side === 'GREEN' ? 'GREEN' : 'RED');
-          if (Math.random() > 0.7) {
-            // Occasional floating text for bots
-            addFloatingText(`${formatCurrency(amount)}`, side === 'GREEN' ? 'text-green-500/50' : 'text-red-500/50');
-          }
+    if (isWhaleBet) {
+      addLog(playerName, `WHALE ALERT! Bet ${formatCurrency(amount)} on ${side}`, 'ALERT');
+      triggerShake();
+      addFloatingText(`WHALE! ${formatCurrency(amount)}`, side === 'GREEN' ? 'text-green-300 font-bold text-xl' : 'text-red-300 font-bold text-xl');
+    } else {
+      if (Math.random() > 0.8) {
+        // addLog(playerName, `Bet ${formatCurrency(amount)} on ${side}`, side === 'GREEN' ? 'GREEN' : 'RED');
+        if (Math.random() > 0.7) {
+          // Occasional floating text for bots
+          addFloatingText(`${formatCurrency(amount)}`, side === 'GREEN' ? 'text-green-500/50' : 'text-red-500/50');
         }
       }
     }
   };
 
-  // --- Core Game Loop ---
+  // --- Multiplayer Game Loop ---
+  // Sync Game State (Timer, Status, Pools)
+  // Sync Game State (Status, Pools, Time, RoundID)
   useEffect(() => {
-    if (gameState.status !== 'PLAYING') return;
-
-    timerRef.current = window.setInterval(() => {
+    const unsubGame = GameService.subscribeToGameState((remoteState) => {
       setGameState(prev => {
-        const newTime = prev.timeLeft - 1;
-        if (newTime < 0) {
-          handleRoundEnd(prev);
-          return { ...prev, status: 'RESOLVING', timeLeft: 0 };
-        }
-        return { ...prev, timeLeft: newTime };
+        // Exclude 'bets' from remoteState to prevent overwriting the live bets list
+        const { bets: _, ...stateWithoutBets } = remoteState;
+        return {
+          ...prev,
+          ...stateWithoutBets,
+          bets: prev.bets // Keep current bets, will be updated by other effect
+        };
       });
-    }, 1000);
+    });
+    return () => unsubGame();
+  }, []); // Run once on mount
 
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [gameState.status]);
-
-  // Bot Actions
+  // Sync Bets (Depends on Round ID)
   useEffect(() => {
-    if (gameState.status !== 'PLAYING') return;
+    // Wait for a valid roundId (initial state is 1, but server might be 100)
+    // We rely on the first GameState sync to update roundId, then this fires.
+    if (!gameState.roundId) return;
 
-    const time = gameState.timeLeft;
-    botsRef.current.forEach(bot => {
-      if (bot.balance <= 0.05) return;
+    console.log("Subscribing to bets for Round:", gameState.roundId);
+    // Clear bets to avoid showing previous round's bets while loading new ones
+    // setGameState(prev => ({ ...prev, bets: [] })); 
 
-      let shouldBet = false;
-      let betAmount = 0;
-      let side: Team = Math.random() > 0.5 ? 'GREEN' : 'RED';
-
-      if (bot.type === 'NORMIE') {
-        const tax = calculateCurrentTax(time);
-        const prob = 0.05 * (1 - tax);
-        if (Math.random() < prob) {
-          shouldBet = true;
-          betAmount = Math.min(bot.balance, 0.05 + Math.random() * 0.2);
-        }
-      } else if (bot.type === 'WHALE') {
-        if (Math.random() < 0.01) {
-          shouldBet = true;
-          betAmount = Math.min(bot.balance, 1.0 + Math.random() * 5.0);
-        }
-      } else if (bot.type === 'SNIPER') {
-        if (time <= 15 && time > 0) {
-          if (Math.random() < 0.3) {
-            shouldBet = true;
-            betAmount = Math.min(bot.balance, bot.balance * (0.2 + Math.random() * 0.3));
-          }
-        }
-      }
-
-      if (shouldBet) {
-        bot.balance -= betAmount;
-        placeBet(bot.id, bot.name, true, side, betAmount);
-      }
+    const unsubBets = GameService.subscribeToBets(gameState.roundId, (remoteBets) => {
+      setGameState(prev => ({ ...prev, bets: remoteBets }));
     });
 
+    return () => unsubBets();
+  }, [gameState.roundId]);
+
+  // "Serverless" Game Driver
+  // This effect runs on every client, but the Transaction ensures only one updates the DB.
+  // "Serverless" Game Driver
+  // This effect runs on every client, but the Transaction ensures only one updates the DB.
+  useEffect(() => {
+    if (!gameState) return;
+
+    // If timer hits 0, trigger next phase
+    if (gameState.timeLeft === 0) {
+      if (gameState.status === 'WAITING') {
+        GameService.advanceGameState('PLAYING');
+      }
+      else if (gameState.status === 'PLAYING') {
+        // Determine Winner (Client-side Randomness is risky but acceptable for MVP)
+        const isGreen = Math.random() > 0.5;
+        const winner = isGreen ? 'GREEN' : 'RED';
+        GameService.advanceGameState('RESULT', { winner });
+      }
+      // Note: RESULT -> WAITING is handled by handleRoundEnd logic to ensure calculations are done.
+    }
   }, [gameState.timeLeft, gameState.status]);
 
+  // Handle Result Phase (Calculate Winners & Advance)
+  const [processedRoundId, setProcessedRoundId] = useState<number | null>(null);
+
+  // Correction: reliance on closure state after timeout is risky.
+  // Better approach: Use a ref to access latest state inside timeout.
+  const gameStateRef = useRef(gameState);
+  useEffect(() => { gameStateRef.current = gameState; }, [gameState]);
+
+  useEffect(() => {
+    if (gameState.status === 'RESULT') {
+      if (processedRoundId === gameState.roundId) return; // Already processed this round
+
+      // Race Condition Fix: Wait 1.5s for 'bets' collection to sync before calculating
+      const timer = setTimeout(() => {
+        console.log("Executing Round End Logic with State:", gameStateRef.current);
+        handleRoundEnd(gameStateRef.current);
+        setProcessedRoundId(gameState.roundId);
+      }, 1500);
+
+      return () => clearTimeout(timer);
+    }
+  }, [gameState.status, gameState.roundId, processedRoundId]);
 
   // --- Resolution Logic ---
   const handleRoundEnd = async (finalState: GameState) => {
-    const { greenPool, redPool, jackpot } = finalState;
-    let winner: Team | 'DRAW' = 'DRAW';
+    console.log("Handling Round End. Pools:", finalState.greenPool, finalState.redPool, "Bets Count:", finalState.bets.length);
+    if (!user) return;
 
-    if (greenPool > redPool) winner = 'GREEN';
-    else if (redPool > greenPool) winner = 'RED';
-    else winner = 'DRAW';
+    const { greenPool, redPool, jackpot, lastWinner } = finalState;
+    // Trust the server's decision on winner
+    const winner = lastWinner || 'DRAW';
 
     let newJackpot = jackpot;
     let userWinnings = 0;
 
-    const userBets = finalState.bets.filter(b => !b.isBot);
+    // CRITICAL FIX: Only process MY bets for payout
+    const myBets = finalState.bets.filter(b => b.playerId === user.uid);
+    // We still need ALL bets to calculate the total pools/shares correctly, 
+    // but we usually have 'greenPool' and 'redPool' aggregates for that.
+    // However, for 'share' calculation: share = myBet.poolAmount / totalRed.
+    // totalRed should match redPool.
 
     if (winner === 'GREEN') {
       const totalGreen = greenPool;
@@ -404,7 +453,7 @@ const App: React.FC = () => {
 
       newJackpot += toJackpot;
 
-      userBets.forEach(bet => {
+      myBets.forEach(bet => {
         if (bet.side === 'GREEN') {
           const share = bet.poolAmount / totalGreen;
           const profit = share * rewardPool;
@@ -417,60 +466,57 @@ const App: React.FC = () => {
     } else if (winner === 'RED') {
       const totalGreen = greenPool;
       const totalRed = redPool;
-      const rewardPool = totalGreen;
-      const jackpotWin = jackpot;
-      newJackpot = 50; // Reset Jackpot
 
-      userBets.forEach(bet => {
-        if (bet.side === 'RED') {
-          const share = bet.poolAmount / totalRed;
-          const profitFromLosers = share * rewardPool;
-          const profitFromJackpot = share * jackpotWin;
-          userWinnings += (bet.poolAmount + profitFromLosers + profitFromJackpot);
-        }
-      });
+      // Anti-Exploit: Cannot win Jackpot if there are no Green bets (uncontested)
+      if (totalGreen <= 0.001) {
+        myBets.forEach(bet => {
+          userWinnings += bet.originalAmount; // Full Refund
+        });
+        addLog('System', `RED WINS (Uncontested)! Full Refund.`, 'RED');
+      } else {
+        const rewardPool = totalGreen;
+        const jackpotWin = jackpot;
+        newJackpot = 0; // Reset Jackpot to 0
 
-      addLog('System', `RED WINS! JACKPOT CLAIMED!`, 'RED');
+        myBets.forEach(bet => {
+          if (bet.side === 'RED') {
+            const share = bet.poolAmount / totalRed;
+            const profitFromLosers = share * rewardPool;
+            const profitFromJackpot = share * jackpotWin;
+            userWinnings += (bet.poolAmount + profitFromLosers + profitFromJackpot);
+          }
+        });
+        addLog('System', `RED WINS! JACKPOT CLAIMED!`, 'RED');
+      }
     } else {
-      userBets.forEach(bet => {
-        userWinnings += bet.poolAmount;
+      myBets.forEach(bet => {
+        userWinnings += bet.originalAmount; // Full Refund on Draw
       });
-      addLog('System', 'DRAW! Bets refunded.', 'INFO');
+      addLog('System', 'DRAW! Full bets refunded.', 'INFO');
     }
 
+    // Award Winnings Locally
     if (userWinnings > 0) {
-      await BalanceService.updateBalance(userWinnings);
-      setTimeout(() => {
-        addLog('System', `YOU WON ${formatCurrency(userWinnings)}!`, 'INFO');
-        addFloatingText(`WINNER! +${formatCurrency(userWinnings)}`, 'text-yellow-400 font-bold text-4xl');
-        triggerShake();
-      }, 500);
+      console.log(`Processing Payout of ${userWinnings} SOL for ${user.displayName}`);
+      try {
+        await BalanceService.updateBalance(userWinnings);
+        setTimeout(() => {
+          addLog('System', `YOU WON ${formatCurrency(userWinnings)} SOL!`, 'INFO');
+          addFloatingText(`WINNER! +${formatCurrency(userWinnings)} SOL`, 'text-yellow-400 font-bold text-4xl');
+          triggerShake();
+        }, 500);
+      } catch (err) {
+        console.error("Payout Failed:", err);
+        addLog('System', 'Payout Error: Contact Admin', 'ALERT');
+      }
     }
 
+    // Trigger Next Round (Reset) - Only one client needs to do this? 
+    // Actually all clients    // Trigger Next Round (Reset)
     setTimeout(() => {
-      resetGame(newJackpot, winner === 'RED');
-    }, 8000);
-  };
-
-  const resetGame = (carriedJackpot: number, isGameOver: boolean) => {
-    setGameState(prev => ({
-      gameId: isGameOver ? prev.gameId + 1 : prev.gameId,
-      roundId: isGameOver ? 1 : prev.roundId + 1,
-      status: 'WAITING',
-      timeLeft: ROUND_DURATION,
-      jackpot: carriedJackpot,
-      houseProfit: prev.houseProfit,
-      greenPool: 0,
-      redPool: 0,
-      bets: [],
-      lastWinner: null
-    }));
-
-    setLogs([]);
-    setTimeout(() => {
-      setGameState(prev => ({ ...prev, status: 'PLAYING' }));
-      addLog('System', 'Round Started! Voting Open.', 'INFO');
-    }, 1000);
+      // Pass the calculated jackpot to the server to persist it for next round
+      GameService.advanceGameState('WAITING', { jackpot: newJackpot });
+    }, 4000);
   };
 
   const handleUserBet = (side: Team) => {
@@ -546,9 +592,8 @@ const App: React.FC = () => {
               <div className="flex gap-3 text-xs font-mono text-slate-400">
                 <span className="flex items-center gap-1"><Trophy size={12} /> GAME #{gameState.gameId}</span>
                 <span className="flex items-center gap-1"><RefreshCw size={12} /> ROUND #{gameState.roundId}</span>
-                {user?.isAdmin && (
-                  <span className="flex items-center gap-1 text-yellow-500"><Landmark size={12} /> HOUSE: {formatCurrency(gameState.houseProfit)}</span>
-                )}
+                {/* Always show House Profit for validation */}
+                <span className="flex items-center gap-1 text-yellow-500 font-bold"><Landmark size={12} /> HOUSE: {formatCurrency(gameState.houseProfit)} SOL</span>
               </div>
             </div>
           </div>
@@ -560,10 +605,18 @@ const App: React.FC = () => {
                 <div className="bg-slate-950 rounded-lg p-1.5 pr-4 border border-slate-700 flex items-center gap-3">
                   <img src={user.photoURL} className="w-8 h-8 rounded bg-slate-800" alt="Avatar" />
                   <div className="flex flex-col">
-                    <span className="text-xs font-bold text-slate-300">{user.displayName}</span>
+                    <div className="flex items-center gap-1 group cursor-pointer" onClick={() => setShowEditProfileModal(true)}>
+                      <span className="text-xs font-bold text-slate-300 group-hover:text-white transition-colors">{user.displayName}</span>
+                      <Settings size={10} className="text-slate-500 group-hover:text-purple-400" />
+                    </div>
                     <div className="flex items-center gap-1 text-green-400 font-mono text-sm leading-none">
                       <Wallet size={12} />
-                      {formatCurrency(user.balance)}
+                      {formatCurrency(user.balance)} SOL
+                      {pendingWithdrawalSum > 0 && (
+                        <span className="text-yellow-500 text-xs ml-1">
+                          (+{formatCurrency(pendingWithdrawalSum)} Pending)
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>

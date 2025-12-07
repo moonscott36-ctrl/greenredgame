@@ -3,9 +3,12 @@ service cloud.firestore {
   match /databases/{database}/documents {
     
     // --- User Profiles ---
-    // Allow users to read and write ONLY their own profile
+    // Allow users to read ANY profile (needed for leaderboard/checking wallet existence)
+    // Allow write by ANY auth user (Critical for "Balance Migration" from old guest accounts)
+    // In a production app with backend, this should be stricter.
     match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read: if true;
+      allow write: if request.auth != null;
     }
 
     // --- Transactions ---
@@ -21,6 +24,20 @@ service cloud.firestore {
     match /withdrawals/{withdrawalId} {
       allow read: if request.auth != null && resource.data.userId == request.auth.uid;
       allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+    }
+
+    // --- Game State (Multiplayer) ---
+    // Anyone can read the game state (timer, pools, etc.)
+    // Anyone logged in can trigger next round (Serverless logic) or place bets
+    match /game_state/{docId} {
+      allow read: if true;
+      allow write: if request.auth != null;
+      
+      // Allow bets subcollection
+      match /bets/{betId} {
+        allow read: if true;
+        allow create: if request.auth != null;
+      }
     }
   }
 }

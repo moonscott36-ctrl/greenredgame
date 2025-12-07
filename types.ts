@@ -10,6 +10,7 @@ export interface Bet {
   originalAmount: number; // Amount before tax
   poolAmount: number;     // Amount added to pool (after tax)
   timestamp: number;
+  roundId?: number;
 }
 
 export interface GameState {

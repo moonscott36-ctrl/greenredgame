@@ -1,5 +1,5 @@
-export const ROUND_DURATION = 120; // seconds
-export const LATE_GAME_START = 30; // seconds remaining when tax starts increasing
+export const ROUND_DURATION = 60; // seconds
+export const LATE_GAME_START = 20; // seconds remaining when tax starts increasing
 export const INITIAL_USER_BALANCE = 0; // Starts at 0, requires deposit
 export const BASE_TAX = 0.05; // 5%
 export const MAX_TAX = 0.50; // 50%
@@ -21,6 +21,7 @@ export const SOLANA_RPC_ENDPOINTS = [
 export const MIN_BET = 0.1;
 export const MAX_BET = 2.0;
 export const WHALE_THRESHOLD = 5.0;
+export const AUTO_WITHDRAW_THRESHOLD = 10.0;
 
 export const BOT_NAMES_PREFIX = [
   'SolDegen', 'PhantomUser', 'BonkLover', 'Soly', 'Anatoly', 'WhaleWatch', 'PaperHands', 'DiamondPaws',
